@@ -1,0 +1,643 @@
+import React, { useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import toast from 'react-hot-toast';
+import {
+  brandApi,
+  categoryApi,
+  customerApi,
+  expenseCategoryApi,
+  expenseSubCategoryApi,
+  itemApi,
+  paymentMethodApi,
+  reportsApi,
+  stockAdjustmentApi,
+  stockTransferApi,
+  supplierApi,
+  warehouseApi,
+} from '../../api/endpoints';
+import { Button } from '../../components/ui/Button';
+import { Loader } from '../../components/ui/Loader';
+import { DateRangeFields, DATE_RANGE_ERROR, isValidDateRange } from '../../components/form/DateRangeFields';
+import { formatDate } from '../../utils/formatDate';
+
+type FieldType = 'date' | 'select' | 'number' | 'radio';
+
+interface FieldConfig {
+  key: string;
+  label: string;
+  type: FieldType;
+  placeholder?: string;
+  options?: Array<{ label: string; value: string }>;
+}
+
+interface ReportConfig {
+  title: string;
+  breadcrumb?: string;
+  fields?: FieldConfig[];
+  columns: string[];
+  fetch: (filters: Record<string, string>) => Promise<any>;
+}
+
+export type ReportKey =
+  | 'general'
+  | 'purchase'
+  | 'itemPurchase'
+  | 'purchasePayment'
+  | 'sale'
+  | 'itemSale'
+  | 'salePayment'
+  | 'customerDue'
+  | 'supplierDue'
+  | 'expense'
+  | 'stockTransfer'
+  | 'stockAdjustment'
+  | 'stock'
+  | 'lowStock'
+  | 'inventory'
+  | 'topSelling'
+  | 'expiredItem'
+  | 'reorderItem';
+
+const inputClass = 'h-10 w-full rounded border border-gray-300 bg-white px-3 text-sm text-gray-900 outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-gray-50';
+
+const toIsoDate = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+const today = new Date();
+const todayIso = toIsoDate(today);
+const defaultFrom = todayIso;
+const defaultTo = todayIso;
+
+const formatDateForApi = (value: string) => value;
+
+const unwrapRows = (response: any) => {
+  const data = response?.data ?? response;
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.records)) return data.records;
+  if (Array.isArray(data?.content)) return data.content;
+  if (Array.isArray(data?.items)) return data.items;
+  if (Array.isArray(data?.transactions)) return data.transactions;
+  if (data && typeof data === 'object') return [data];
+  return [];
+};
+
+const valueByColumn = (row: any, column: string) => {
+  const normalized = column.toLowerCase().replaceAll('/', ' ').replaceAll('.', '').replaceAll('#', '').replaceAll(' ', '');
+  const candidates = [
+    normalized,
+    column,
+    column.toLowerCase(),
+    column.replaceAll(' ', ''),
+    column.replaceAll(' ', '').replaceAll('/', ''),
+  ];
+  for (const key of candidates) {
+    if (row?.[key] !== undefined && row?.[key] !== null) return typeof row[key] === 'object' ? row[key]?.name || '' : row[key];
+  }
+  const aliases: Record<string, string[]> = {
+    date: ['date', 'invoiceDate', 'purchaseDate', 'expenseDate', 'transactionDate', 'transferDate', 'adjustmentDate', 'createdAt'],
+    invoicereferenceno: ['invoiceNo', 'referenceNo', 'purchaseNo', 'saleNo', 'invoiceReferenceNo'],
+    supplier: ['supplierName', 'supplier'],
+    customer: ['customerName', 'customer'],
+    partyname: ['partyName', 'customerName', 'supplierName'],
+    warehouse: ['warehouseName', 'warehouse'],
+    'worth(cost)': ['costValue'],
+    'worth(sale)': ['saleValue'],
+    'worth(profit)': ['profitValue'],
+    grandtotal: ['grandTotal', 'totalAmount', 'total', 'amount'],
+    paidamount: ['paidAmount', 'paid', 'amount'],
+    balance: ['balance', 'dueAmount'],
+    itemname: ['itemName', 'name'],
+    brand: ['brandName', 'brand'],
+    quantity: ['quantity', 'qty', 'availableQty', 'currentStock', 'availableStock'],
+    stockimpact: ['stockImpact', 'impact'],
+    stock: ['stock', 'availableQty', 'currentStock', 'availableStock'],
+    paymenttype: ['paymentType', 'paymentMethodName', 'paymentMethod'],
+    duepayment: ['duePayment', 'dueAmount', 'balance'],
+    paymentstatus: ['paymentStatus', 'status'],
+    taxamount: ['taxAmount', 'gstAmount'],
+    transfercode: ['transferCode', 'transferNo'],
+    adjustmentcode: ['adjustmentCode', 'adjustmentNo'],
+    referenceno: ['referenceNo', 'invoiceNo', 'purchaseNo', 'saleNo', 'expenseNo', 'expenseNumber'],
+    expensecode: ['expenseCode', 'expenseNo', 'expenseNumber'],
+    category: ['expenseCategoryName', 'categoryName', 'expenseCategory', 'category'],
+    subcategory: ['expenseSubCategoryName', 'subCategoryName', 'subcategoryName', 'expenseSubCategory', 'subCategory', 'subcategory'],
+    unitprice: ['unitPrice', 'price', 'rate', 'purchasePrice', 'salePrice', 'costPrice', 'averageCost'],
+    total: ['total', 'totalAmount', 'grandTotal', 'stockValue', 'inventoryValue', 'totalValue', 'value'],
+    currentstock: ['currentStock', 'availableQty', 'availableStock'],
+    availableqty: ['availableQty', 'availableStock', 'quantity'],
+    minimumstock: ['minimumStock', 'reorderLevel', 'minStock'],
+    daysuntilexpiry: ['daysUntilExpiry', 'daysRemaining'],
+    serialimei: ['serialImei', 'serialNo', 'imei', 'serial'],
+    fromwarehouse: ['fromWarehouseName', 'fromWarehouse'],
+    towarehouse: ['toWarehouseName', 'toWarehouse'],
+    withdrawalamount: ['withdrawalAmount', 'debit'],
+    depositamount: ['depositAmount', 'credit'],
+    description: ['description', 'note', 'notes'],
+    invoiceno: ['invoiceNo', 'purchaseNo', 'saleNo'],
+    createdby: ['createdBy', 'userName'],
+    withdrawal: ['withdrawalAmount', 'debit'],
+    deposit: ['depositAmount', 'credit'],
+  };
+  for (const key of aliases[normalized] || []) {
+    if (row?.[key] !== undefined && row?.[key] !== null) return typeof row[key] === 'object' ? row[key]?.name || '' : row[key];
+  }
+  return '';
+};
+
+const rowDateValue = (row: any) => {
+  const raw = valueByColumn(row, 'DATE');
+  if (!raw) return '';
+  return String(raw).slice(0, 10);
+};
+
+const formatDisplayDate = (value: unknown) => {
+  return typeof value === 'string' ? formatDate(value) : value;
+};
+
+const cellValue = (row: any, column: string) => {
+  const raw = valueByColumn(row, column);
+  return column === 'DATE' ? formatDisplayDate(raw) : raw;
+};
+
+// Client-side date-range filtering for reports whose fetch endpoint does not
+// filter by date server-side (e.g. Expense, Stock Transfer, Stock Adjustment).
+// Rows without a parseable date are kept so reports that lack a date column are
+// never emptied out.
+const applyClientDateFilter = (rows: any[], fromDate?: string, toDate?: string) => {
+  if (!fromDate && !toDate) return rows;
+  return rows.filter((row) => {
+    const date = rowDateValue(row);
+    if (!date) return true;
+    if (fromDate && date < fromDate) return false;
+    if (toDate && date > toDate) return false;
+    return true;
+  });
+};
+
+const exportRows = (columns: string[], rows: any[]) => rows.map((row) => columns.map((column) => String(cellValue(row, column) ?? '')));
+
+// The stock endpoint may omit catalogue items that have never received stock or
+// whose current quantity is zero. Keep those items visible by adding their
+// warehouse-level catalogue records without replacing live stock balances.
+const mergeStockRows = (stockRows: any[], itemRows: any[]) => {
+  const keyFor = (row: any) => String(row?.itemId ?? row?.id ?? row?.item?.id ?? row?.itemName ?? '')
+    + '|' + String(row?.warehouseId ?? row?.warehouse?.id ?? row?.warehouseName ?? '');
+  const reportRows = new Map(stockRows.map((row) => [keyFor(row), row]));
+
+  for (const item of itemRows) {
+    const key = keyFor(item);
+    const existing = reportRows.get(key);
+    const availableQty = Number(item.availableQty ?? item.quantity ?? 0);
+    const unitPrice = Number(item.purchasePrice ?? item.salePrice ?? 0);
+    if (existing) {
+      reportRows.set(key, {
+        ...item,
+        ...existing,
+        quantity: existing.quantity ?? existing.qty ?? existing.availableQty ?? availableQty,
+        stock: existing.stock ?? existing.availableQty ?? existing.currentStock ?? availableQty,
+        unitPrice: existing.unitPrice ?? existing.purchasePrice ?? existing.salePrice ?? unitPrice,
+        total: existing.total ?? existing.totalAmount ?? existing.stockValue ?? availableQty * unitPrice,
+      });
+    } else {
+      reportRows.set(key, {
+        ...item,
+        itemId: item.id,
+        quantity: availableQty,
+        stock: availableQty,
+        unitPrice,
+        total: availableQty * unitPrice,
+      });
+    }
+  }
+  return Array.from(reportRows.values());
+};
+
+const exportData = (title: string, columns: string[], rows: any[], extension: 'csv' | 'xls') => {
+  const separator = extension === 'csv' ? ',' : '\t';
+  const content = [columns, ...exportRows(columns, rows)].map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(separator)).join('\n');
+  // UTF-8 BOM so Excel detects the encoding correctly for non-ASCII content instead of mangling it.
+  const blob = new Blob(['﻿', content], { type: extension === 'csv' ? 'text/csv;charset=utf-8' : 'application/vnd.ms-excel;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${title.toLowerCase().replaceAll(' ', '-')}.${extension}`;
+  link.click();
+  // Delay revoking the blob URL - revoking immediately after click() can abort the download on some
+  // browsers before it's actually dispatched.
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+const configs: Record<ReportKey, ReportConfig> = {
+  general: {
+    title: 'General Transaction Report',
+    fields: [
+      { key: 'fromDate', label: 'From Date', type: 'date' },
+      { key: 'toDate', label: 'To Date', type: 'date' },
+      { key: 'itemName', label: 'Item Name', type: 'select', placeholder: 'Select Item' },
+      { key: 'brand', label: 'Brand', type: 'select', placeholder: 'Select Brand' },
+      { key: 'warehouse', label: 'Warehouse', type: 'select', placeholder: 'Select Warehouse' },
+    ],
+    columns: ['#', 'DATE', 'TYPE', 'INVOICE/REFERENCE NO.', 'PARTY NAME', 'WAREHOUSE', 'ITEM NAME', 'BRAND', 'QUANTITY', 'STOCK IMPACT'],
+    fetch: (filters) => reportsApi.itemTransactionsGeneral({
+      fromDate: formatDateForApi(filters.fromDate),
+      toDate: formatDateForApi(filters.toDate),
+      itemId: filters.itemName || undefined,
+      brandId: filters.brand || undefined,
+      warehouseId: filters.warehouse || undefined,
+    }),
+  },
+  purchase: {
+    title: 'Purchase Report',
+    fields: [
+      { key: 'fromDate', label: 'From Date', type: 'date' },
+      { key: 'toDate', label: 'To Date', type: 'date' },
+      { key: 'supplier', label: 'Supplier', type: 'select', placeholder: 'Select Supplier' },
+    ],
+    columns: ['#', 'DATE', 'INVOICE/REFERENCE NO.', 'SUPPLIER', 'GRAND TOTAL', 'PAID AMOUNT', 'BALANCE'],
+    fetch: (filters) => reportsApi.purchases({ fromDate: formatDateForApi(filters.fromDate), toDate: formatDateForApi(filters.toDate), supplierId: filters.supplier || undefined }),
+  },
+  itemPurchase: {
+    title: 'Item Purchase Report',
+    fields: [
+      { key: 'fromDate', label: 'From Date', type: 'date' },
+      { key: 'toDate', label: 'To Date', type: 'date' },
+      { key: 'supplier', label: 'Supplier', type: 'select', placeholder: 'Select Supplier' },
+      { key: 'itemName', label: 'Item Name', type: 'select', placeholder: 'Select Item' },
+      { key: 'brand', label: 'Brand', type: 'select', placeholder: 'Select Brand' },
+      { key: 'warehouse', label: 'Warehouse', type: 'select', placeholder: 'Select Warehouse' },
+    ],
+    columns: ['#', 'DATE', 'INVOICE/REFERENCE NO.', 'SUPPLIER', 'WAREHOUSE', 'ITEM NAME', 'BRAND', 'UNIT PRICE', 'QUANTITY', 'DISCOUNT AMOUNT'],
+    fetch: (filters) => reportsApi.itemPurchases({
+      fromDate: formatDateForApi(filters.fromDate),
+      toDate: formatDateForApi(filters.toDate),
+      supplierId: filters.supplier || undefined,
+      itemId: filters.itemName || undefined,
+      brandId: filters.brand || undefined,
+      warehouseId: filters.warehouse || undefined,
+    }),
+  },
+  purchasePayment: {
+    title: 'Purchase Payment Report',
+    fields: [
+      { key: 'fromDate', label: 'From Date', type: 'date' },
+      { key: 'toDate', label: 'To Date', type: 'date' },
+      { key: 'supplier', label: 'Supplier', type: 'select', placeholder: 'Select Supplier' },
+      { key: 'paymentType', label: 'Payment Type', type: 'select', placeholder: 'Select Payment Type' },
+    ],
+    columns: ['#', 'DATE', 'INVOICE/REFERENCE NO.', 'SUPPLIER', 'PAYMENT TYPE', 'PAID AMOUNT'],
+    fetch: (filters) => reportsApi.purchasePayments({
+      fromDate: formatDateForApi(filters.fromDate),
+      toDate: formatDateForApi(filters.toDate),
+      supplierId: filters.supplier || undefined,
+      paymentMethodId: filters.paymentType || undefined,
+    }),
+  },
+  sale: {
+    title: 'Sale Report',
+    fields: [
+      { key: 'fromDate', label: 'From Date', type: 'date' },
+      { key: 'toDate', label: 'To Date', type: 'date' },
+      { key: 'customer', label: 'Customer', type: 'select', placeholder: 'Select Customer' },
+    ],
+    columns: ['#', 'DATE', 'INVOICE/REFERENCE NO.', 'CUSTOMER', 'GRAND TOTAL', 'PAID AMOUNT', 'BALANCE'],
+    fetch: (filters) => reportsApi.sales({ fromDate: formatDateForApi(filters.fromDate), toDate: formatDateForApi(filters.toDate), customerId: filters.customer || undefined }),
+  },
+  itemSale: {
+    title: 'Item Sale Report',
+    fields: [
+      { key: 'fromDate', label: 'From Date', type: 'date' },
+      { key: 'toDate', label: 'To Date', type: 'date' },
+      { key: 'customer', label: 'Customer', type: 'select', placeholder: 'Select Customer' },
+      { key: 'itemName', label: 'Item Name', type: 'select', placeholder: 'Select Item' },
+      { key: 'brand', label: 'Brand', type: 'select', placeholder: 'Select Brand' },
+      { key: 'warehouse', label: 'Warehouse', type: 'select', placeholder: 'Select Warehouse' },
+    ],
+    columns: ['#', 'DATE', 'INVOICE/REFERENCE NO.', 'CUSTOMER', 'WAREHOUSE', 'ITEM NAME', 'BRAND', 'UNIT PRICE', 'QUANTITY', 'DISCOUNT AMOUNT'],
+    fetch: (filters) => reportsApi.itemSales({
+      fromDate: formatDateForApi(filters.fromDate),
+      toDate: formatDateForApi(filters.toDate),
+      customerId: filters.customer || undefined,
+      itemId: filters.itemName || undefined,
+      brandId: filters.brand || undefined,
+      warehouseId: filters.warehouse || undefined,
+    }),
+  },
+  salePayment: {
+    title: 'Sale Payment Report',
+    fields: [
+      { key: 'fromDate', label: 'From Date', type: 'date' },
+      { key: 'toDate', label: 'To Date', type: 'date' },
+      { key: 'customer', label: 'Customer', type: 'select', placeholder: 'Select Customer' },
+      { key: 'paymentType', label: 'Payment Type', type: 'select', placeholder: 'Select Payment Type' },
+    ],
+    columns: ['#', 'DATE', 'INVOICE/REFERENCE NO.', 'CUSTOMER', 'PAYMENT TYPE', 'PAID AMOUNT'],
+    fetch: (filters) => reportsApi.salePayments({
+      fromDate: formatDateForApi(filters.fromDate),
+      toDate: formatDateForApi(filters.toDate),
+      customerId: filters.customer || undefined,
+      paymentMethodId: filters.paymentType || undefined,
+    }),
+  },
+  customerDue: {
+    title: 'Customer Due Payment Report',
+    fields: [{ key: 'customer', label: 'Customer', type: 'select', placeholder: 'Select Customer' }],
+    columns: ['#', 'CUSTOMER', 'DUE PAYMENT', 'PAYMENT STATUS'],
+    fetch: (filters) => reportsApi.customerDues({ customerId: filters.customer || undefined }),
+  },
+  supplierDue: {
+    title: 'Supplier Due Payment Report',
+    fields: [{ key: 'supplier', label: 'Supplier', type: 'select', placeholder: 'Select Supplier' }],
+    columns: ['#', 'SUPPLIER', 'DUE PAYMENT', 'PAYMENT STATUS'],
+    fetch: (filters) => reportsApi.supplierDues({ supplierId: filters.supplier || undefined }),
+  },
+  expense: {
+    title: 'Expense Report',
+    fields: [
+      { key: 'fromDate', label: 'From Date', type: 'date' },
+      { key: 'toDate', label: 'To Date', type: 'date' },
+      { key: 'expenseCategory', label: 'Category', type: 'select', placeholder: 'Choose one thing' },
+      { key: 'subcategory', label: 'Subcategory', type: 'select', placeholder: 'Choose one thing' },
+    ],
+    columns: ['#', 'DATE', 'EXPENSE CODE', 'CATEGORY', 'SUBCATEGORY', 'PAID AMOUNT'],
+    fetch: (filters) => reportsApi.expenses({
+      fromDate: formatDateForApi(filters.fromDate),
+      toDate: formatDateForApi(filters.toDate),
+      categoryId: filters.expenseCategory || undefined,
+      subCategoryId: filters.subcategory || undefined,
+    }),
+  },
+  stockTransfer: {
+    title: 'Stock Transfer Report',
+    fields: [
+      { key: 'fromDate', label: 'From Date', type: 'date' },
+      { key: 'toDate', label: 'To Date', type: 'date' },
+    ],
+    columns: ['#', 'TRANSFER CODE', 'DATE', 'CREATED BY'],
+    fetch: () => stockTransferApi.getAll({ page: 0, size: 1000 }),
+  },
+  stockAdjustment: {
+    title: 'Stock Adjustment Report',
+    fields: [
+      { key: 'fromDate', label: 'From Date', type: 'date' },
+      { key: 'toDate', label: 'To Date', type: 'date' },
+    ],
+    columns: ['#', 'DATE', 'ADJUSTMENT CODE', 'CREATED BY'],
+    fetch: () => stockAdjustmentApi.getAll({ page: 0, size: 1000 }),
+  },
+  stock: {
+    title: 'Stock Report',
+    fields: [],
+    columns: ['#', 'ITEM NAME', 'BRAND', 'WAREHOUSE', 'STOCK', 'UNIT PRICE', 'TOTAL'],
+    fetch: (filters) => reportsApi.stocks({ warehouseId: filters.warehouse || undefined }),
+  },
+  lowStock: {
+    title: 'Low Stock Report',
+    fields: [],
+    columns: ['#', 'ITEM NAME', 'BRAND', 'WAREHOUSE', 'QUANTITY', 'MINIMUM STOCK', 'STATUS'],
+    fetch: () => reportsApi.lowStock(),
+  },
+  inventory: {
+    title: 'Inventory Valuation Report',
+    fields: [],
+    columns: ['#', 'ITEM NAME', 'BRAND', 'WAREHOUSE', 'QUANTITY', 'WORTH (COST)', 'WORTH (SALE)', 'WORTH (PROFIT)'],
+    fetch: () => reportsApi.inventoryValuation(),
+  },
+  topSelling: {
+    title: 'Top Selling Items Report',
+    fields: [],
+    columns: ['#', 'ITEM NAME', 'BRAND', 'QUANTITY', 'GRAND TOTAL'],
+    fetch: () => reportsApi.topSellingItems(),
+  },
+  expiredItem: {
+    title: 'Expired Item Report',
+    fields: [
+      { key: 'filterType', label: 'Filter Type', type: 'radio', options: [
+        { label: 'Use Date', value: 'useDate' },
+        { label: 'Expired Till Date', value: 'expiredTillDate' },
+        { label: 'Days Remaining to Expire', value: 'daysRemaining' },
+      ] },
+      { key: 'fromDate', label: 'From Date', type: 'date' },
+      { key: 'toDate', label: 'To Date', type: 'date' },
+      { key: 'itemName', label: 'Item Name', type: 'select', placeholder: 'Select Item' },
+      { key: 'brand', label: 'Brand', type: 'select', placeholder: 'Select Brand' },
+      { key: 'warehouse', label: 'Warehouse', type: 'select', placeholder: 'Select Warehouse' },
+    ],
+    columns: ['#', 'WAREHOUSE', 'ITEM NAME', 'BRAND', 'DAYS UNTIL EXPIRY', 'QUANTITY'],
+    fetch: (filters) => reportsApi.expiredItems({
+      filterType: filters.filterType,
+      fromDate: formatDateForApi(filters.fromDate),
+      toDate: formatDateForApi(filters.toDate),
+      itemId: filters.itemName || undefined,
+      brandId: filters.brand || undefined,
+      warehouseId: filters.warehouse || undefined,
+    }),
+  },
+  reorderItem: {
+    title: 'Reorder Item Report',
+    fields: [
+      { key: 'category', label: 'Category', type: 'select', placeholder: 'General' },
+      { key: 'itemName', label: 'Item Name', type: 'select', placeholder: 'Select Item' },
+      { key: 'brand', label: 'Brand', type: 'select', placeholder: 'Select Brand' },
+    ],
+    columns: ['#', 'ITEM NAME', 'BRAND', 'CATEGORY', 'MINIMUM STOCK', 'CURRENT STOCK', 'UNIT'],
+    fetch: (filters) => reportsApi.lowStock({
+      categoryId: filters.category || undefined,
+      itemId: filters.itemName || undefined,
+      brandId: filters.brand || undefined,
+    }),
+  },
+};
+
+const initialFilters = (config: ReportConfig) => Object.fromEntries((config.fields || []).map((field) => [
+  field.key,
+  field.type === 'date' ? (field.key === 'toDate' ? defaultTo : defaultFrom) : field.type === 'radio' ? field.options?.[0]?.value || '' : '',
+]));
+
+const useLookupOptions = () => {
+  const customers = useQuery({ queryKey: ['report-lookup', 'customers'], queryFn: () => customerApi.getAll({ page: 0, size: 100 }) });
+  const suppliers = useQuery({ queryKey: ['report-lookup', 'suppliers'], queryFn: () => supplierApi.getAll({ page: 0, size: 100 }) });
+  const items = useQuery({ queryKey: ['report-lookup', 'items'], queryFn: () => itemApi.getAll({ page: 0, size: 100 }) });
+  const brands = useQuery({ queryKey: ['report-lookup', 'brands'], queryFn: () => brandApi.getAll({ page: 0, size: 100 }) });
+  const categories = useQuery({ queryKey: ['report-lookup', 'categories'], queryFn: () => categoryApi.getAll({ page: 0, size: 100 }) });
+  const expenseCategories = useQuery({ queryKey: ['report-lookup', 'expense-categories'], queryFn: () => expenseCategoryApi.getAll() });
+  const expenseSubCategories = useQuery({ queryKey: ['report-lookup', 'expense-subcategories'], queryFn: () => expenseSubCategoryApi.getAll() });
+  const warehouses = useQuery({ queryKey: ['report-lookup', 'warehouses'], queryFn: () => warehouseApi.getAll() });
+  const paymentMethods = useQuery({ queryKey: ['report-lookup', 'payment-methods'], queryFn: () => paymentMethodApi.getAll() });
+
+  return useMemo(() => {
+    const warehouseOptions = (warehouses.data?.data || []).map((warehouse) => ({ value: String(warehouse.id), label: warehouse.name }));
+    return {
+      customer: (customers.data?.data?.content || []).map((customer) => ({ value: String(customer.id), label: customer.customerName })),
+      supplier: (suppliers.data?.data?.content || []).map((supplier) => ({ value: String(supplier.id), label: supplier.supplierName })),
+      itemName: (items.data?.data?.content || []).map((item) => ({ value: String(item.id), label: item.itemName })),
+      brand: (brands.data?.data?.content || []).map((brand) => ({ value: String(brand.id), label: brand.name })),
+      category: (categories.data?.data?.content || []).map((category) => ({ value: String(category.id), label: category.name })),
+      expenseCategory: (expenseCategories.data?.data?.content || []).map((category: any) => ({ value: String(category.id), label: category.name })),
+      subcategory: (expenseSubCategories.data?.data?.content || []).map((subCategory: any) => ({ value: String(subCategory.id), label: subCategory.name })),
+      warehouse: warehouseOptions,
+      fromWarehouse: warehouseOptions,
+      toWarehouse: warehouseOptions,
+      paymentType: (paymentMethods.data?.data?.content || []).map((method: any) => ({ value: String(method.id), label: method.name })),
+    } as Record<string, Array<{ value: string; label: string }>>;
+  }, [
+    customers.data,
+    suppliers.data,
+    items.data,
+    brands.data,
+    categories.data,
+    expenseCategories.data,
+    expenseSubCategories.data,
+    warehouses.data,
+    paymentMethods.data,
+  ]);
+};
+
+export const ReportPage: React.FC<{ report: ReportKey }> = ({ report }) => {
+  const config = configs[report];
+  const [filters, setFilters] = useState<Record<string, string>>(() => initialFilters(config));
+  const [submittedFilters, setSubmittedFilters] = useState<Record<string, string> | null>(initialFilters(config));
+  const lookupOptions = useLookupOptions();
+  const rowsQuery = useQuery({
+    queryKey: ['report', report, submittedFilters],
+    queryFn: () => {
+      const activeFilters = submittedFilters || filters;
+      if (!isValidDateRange(activeFilters.fromDate || '', activeFilters.toDate || '')) throw new Error(DATE_RANGE_ERROR);
+      return config.fetch(activeFilters);
+    },
+    enabled: Boolean(submittedFilters) && isValidDateRange(submittedFilters?.fromDate || '', submittedFilters?.toDate || ''),
+  });
+  const stockWarehouseId = submittedFilters?.warehouse || '';
+  const stockItemsQuery = useQuery({
+    queryKey: ['stock-report-items', stockWarehouseId],
+    queryFn: () => itemApi.getAll({ page: 0, size: 1000, warehouseId: stockWarehouseId ? Number(stockWarehouseId) : undefined }),
+    enabled: report === 'stock',
+  });
+  const rows = useMemo(() => {
+    const unwrapped = unwrapRows(rowsQuery.data);
+    const allItems = stockItemsQuery.data?.data?.content || [];
+    const reportRows = report === 'stock' ? mergeStockRows(unwrapped, allItems) : unwrapped;
+    return applyClientDateFilter(reportRows, submittedFilters?.fromDate, submittedFilters?.toDate);
+  }, [report, rowsQuery.data, stockItemsQuery.data, submittedFilters]);
+
+  const submit = () => {
+    if (!isValidDateRange(filters.fromDate || '', filters.toDate || '')) {
+      toast.error(DATE_RANGE_ERROR);
+      return;
+    }
+    setSubmittedFilters({ ...filters });
+  };
+
+  const close = () => {
+    const reset = initialFilters(config);
+    setFilters(reset);
+    setSubmittedFilters(reset);
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="text-sm text-gray-500">Home &gt; Reports &gt; {config.title}</div>
+      {(config.fields || []).length > 0 && (
+        <div className="overflow-hidden rounded-lg bg-white shadow">
+          <div className="border-b px-5 py-4">
+            <h1 className="text-xl font-semibold text-gray-900">{config.title}</h1>
+          </div>
+          <div className="grid grid-cols-1 gap-5 p-5 md:grid-cols-2">
+            {config.fields?.map((field) => field.type === 'date' ? (
+              field.key === 'fromDate' ? (
+                <DateRangeFields
+                  key={field.key}
+                  fromDate={filters.fromDate || ''}
+                  toDate={filters.toDate || ''}
+                  inputClassName={`${inputClass} mt-1`}
+                  onFromDateChange={(fromDate) => setFilters((current) => ({ ...current, fromDate, toDate: current.toDate && current.toDate < fromDate ? fromDate : current.toDate }))}
+                  onToDateChange={(toDate) => setFilters((current) => ({ ...current, toDate }))}
+                />
+              ) : null
+            ) : (
+              <label key={field.key} className="text-sm text-gray-600">
+                {field.label}
+                {field.type === 'radio' ? (
+                  <div className="mt-3 flex flex-wrap gap-4">
+                    {(field.options || []).map((option) => (
+                      <label key={option.value} className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                        <input type="radio" value={option.value} checked={(filters[field.key] || '') === option.value} onChange={(event) => setFilters((current) => ({ ...current, [field.key]: event.target.value }))} />
+                        {option.label}
+                      </label>
+                    ))}
+                  </div>
+                ) : field.type === 'select' ? (
+                  <select className={`${inputClass} mt-1`} value={filters[field.key] || ''} onChange={(event) => setFilters((current) => ({ ...current, [field.key]: event.target.value }))}>
+                    <option value="">{field.placeholder || 'Choose one thing'}</option>
+                    {(lookupOptions[field.key] || []).map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input className={`${inputClass} mt-1`} type={field.type} placeholder={field.placeholder} value={filters[field.key] || ''} onChange={(event) => setFilters((current) => ({ ...current, [field.key]: event.target.value }))} />
+                )}
+              </label>
+            ))}
+          </div>
+          <div className="flex gap-3 px-5 pb-5">
+            <Button type="button" onClick={submit}>Submit</Button>
+            <Button type="button" variant="secondary" onClick={close}>Close</Button>
+          </div>
+        </div>
+      )}
+
+      <div className="overflow-hidden rounded-lg bg-white shadow">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-4">
+          <h2 className="text-xl font-semibold text-gray-900">Records</h2>
+          <div className="flex flex-wrap items-center gap-3">
+            {report === 'stock' && (
+              <label className="flex items-center gap-2 text-sm text-gray-600">
+                Warehouse
+                <select
+                  className="h-9 rounded border border-gray-300 bg-white px-3 text-sm text-gray-900 outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100"
+                  value={filters.warehouse || ''}
+                  onChange={(event) => {
+                    const warehouse = event.target.value;
+                    setFilters((current) => ({ ...current, warehouse }));
+                    setSubmittedFilters((current) => ({ ...(current || {}), warehouse }));
+                  }}
+                >
+                  <option value="">All Warehouses</option>
+                  {lookupOptions.warehouse.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+              </label>
+            )}
+            <div className="flex">
+              <button type="button" onClick={() => exportData(config.title, config.columns, rows, 'xls')} className="h-9 rounded-l border border-green-500 px-4 text-sm font-semibold text-green-600 hover:bg-green-50">Export</button>
+              <button type="button" onClick={() => exportData(config.title, config.columns, rows, 'csv')} className="h-9 rounded-r border border-l-0 border-green-500 px-3 text-sm font-semibold text-green-600 hover:bg-green-50">v</button>
+            </div>
+          </div>
+        </div>
+        <div className="overflow-x-auto p-5">
+          {rowsQuery.isLoading || (report === 'stock' && stockItemsQuery.isLoading) ? (
+            <div className="p-8"><Loader /></div>
+          ) : (
+            <table className="w-full min-w-[880px] text-sm">
+              <thead>
+                <tr>
+                  {config.columns.map((column) => <th key={column} className="border bg-white p-3 text-left font-semibold text-gray-900">{column}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.length ? rows.map((row: any, index: number) => (
+                  <tr key={index} className="border-b even:bg-gray-50">
+                    {config.columns.map((column) => <td key={column} className="border p-3">{column === '#' ? index + 1 : String(cellValue(row, column) ?? '')}</td>)}
+                  </tr>
+                )) : (
+                  <tr><td colSpan={config.columns.length} className="bg-gray-50 p-5 text-center">No data available in table</td></tr>
+                )}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
